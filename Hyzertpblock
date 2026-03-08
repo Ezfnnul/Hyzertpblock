@@ -1,0 +1,1205 @@
+--[[
+    ╔══════════════════════════════════════════════════════════╗
+    ║         HYZER TP-BLOCK  +  RYZE AUTO GRAB V2            ║
+    ║  • Teleport / Keybind / Auto-Block / Block All          ║
+    ║  • Auto Grab intégré                                    ║
+    ║  • Tp Block : tp devant brainrot slot choisi + block    ║
+    ║  • Scroll du menu avec boutons ▲ ▼                      ║
+    ╚══════════════════════════════════════════════════════════╝
+--]]
+
+-- ════════════════════════════════════════════════════════════
+-- SERVICES
+-- ════════════════════════════════════════════════════════════
+local Players             = game:GetService("Players")
+local StarterGui          = game:GetService("StarterGui")
+local UserInputService    = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local RunService          = game:GetService("RunService")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local TweenService        = game:GetService("TweenService")
+
+local player    = Players.LocalPlayer
+local PlayerGui = player:WaitForChild("PlayerGui")
+
+-- ════════════════════════════════════════════════════════════
+-- CHARACTER
+-- ════════════════════════════════════════════════════════════
+local backpack = player:WaitForChild("Backpack")
+local char     = player.Character or player.CharacterAdded:Wait()
+local humanoid = char:WaitForChild("Humanoid")
+local hrp      = char:WaitForChild("HumanoidRootPart")
+
+player.CharacterAdded:Connect(function(c)
+    char = c
+    humanoid = c:WaitForChild("Humanoid")
+    hrp      = c:WaitForChild("HumanoidRootPart")
+end)
+
+-- ════════════════════════════════════════════════════════════
+-- CONFIG
+-- ════════════════════════════════════════════════════════════
+local blockDelay       = 0.7
+local minDelay         = 0.1
+local maxDelay         = 5.0
+local autoBlockEnabled = true
+local teleportKey      = Enum.KeyCode.F
+local waitingForKey    = false
+local lastTarget       = nil
+local REQUIRED_TOOL    = "Flying Carpet"
+
+local spots = {
+    CFrame.new(-402.18,-6.34,131.83)*CFrame.Angles(0,math.rad(-20.08),0),
+    CFrame.new(-416.66,-6.34, -2.05)*CFrame.Angles(0,math.rad(-62.89),0),
+    CFrame.new(-329.37,-4.68, 18.12)*CFrame.Angles(0,math.rad(-30.53),0),
+}
+
+-- ════════════════════════════════════════════════════════════
+-- TP BLOCK STATE
+-- ════════════════════════════════════════════════════════════
+local selectedSlot     = 1
+local slotESPHighlight = nil
+local slotESPBillboard = nil
+
+-- ════════════════════════════════════════════════════════════
+-- RAINBOW
+-- ════════════════════════════════════════════════════════════
+local rainbowClock = 0
+local function hsv(h,s,v)
+    local i=math.floor(h*6); local f=h*6-i
+    local p,q,t=v*(1-s),v*(1-f*s),v*(1-(1-f)*s)
+    i=i%6
+    if i==0 then return Color3.new(v,t,p) elseif i==1 then return Color3.new(q,v,p)
+    elseif i==2 then return Color3.new(p,v,t) elseif i==3 then return Color3.new(p,q,v)
+    elseif i==4 then return Color3.new(t,p,v) else return Color3.new(v,p,q) end
+end
+local function rbw() return hsv((rainbowClock%4)/4,1,1) end
+
+-- ════════════════════════════════════════════════════════════
+-- FIND CLONE IN BASE
+-- ════════════════════════════════════════════════════════════
+local function findCloneInBases()
+    local plots=workspace:FindFirstChild("Plots"); if not plots then return nil,nil end
+    for _,plot in ipairs(plots:GetChildren()) do
+        for _,obj in ipairs(plot:GetDescendants()) do
+            if (obj:IsA("Model") or obj:IsA("BasePart")) and obj.Name==player.Name then
+                for _,plr in ipairs(Players:GetPlayers()) do
+                    if plr~=player and plr.Name==plot.Name then return plr,plot end
+                end
+                local sign=plot:FindFirstChild("PlotSign")
+                if sign then
+                    for _,tag in ipairs({"OwnerName","PlayerName"}) do
+                        local nt=sign:FindFirstChild(tag)
+                        if nt then local plr=Players:FindFirstChild(nt.Text); if plr and plr~=player then return plr,plot end end
+                    end
+                end
+            end
+        end
+    end
+    return nil,nil
+end
+
+local function findBrainrotAtSlot(plot,slotNum)
+    if not plot then return nil end
+    local pods=plot:FindFirstChild("AnimalPodiums"); if not pods then return nil end
+    local pod=pods:FindFirstChild(tostring(slotNum)); if not pod then return nil end
+    local base=pod:FindFirstChild("Base"); if not base then return nil end
+    local spwn=base:FindFirstChild("Spawn"); if not spwn then return nil end
+    for _,c in ipairs(spwn:GetChildren()) do if c:IsA("Model") or c:IsA("BasePart") then return c end end
+    for _,d in ipairs(spwn:GetDescendants()) do if d:IsA("Model") or (d:IsA("BasePart") and d.Name~="Base") then return d end end
+    return nil
+end
+
+local function getBrainrotPosition(plot,slotNum)
+    local model=findBrainrotAtSlot(plot,slotNum); if not model then return nil end
+    if model:IsA("Model") then
+        if model.PrimaryPart then return model.PrimaryPart.Position end
+        local ok,cf=pcall(function() return model:GetBoundingBox() end)
+        if ok and cf then return cf.Position end
+        local p=model:FindFirstChildWhichIsA("BasePart"); if p then return p.Position end
+    elseif model:IsA("BasePart") then return model.Position end
+    return nil
+end
+
+-- ════════════════════════════════════════════════════════════
+-- SLOT ESP
+-- ════════════════════════════════════════════════════════════
+local function clearSlotESP()
+    if slotESPHighlight and slotESPHighlight.Parent then slotESPHighlight:Destroy() end
+    if slotESPBillboard and slotESPBillboard.Parent then slotESPBillboard:Destroy() end
+    slotESPHighlight=nil; slotESPBillboard=nil
+end
+
+local function showSlotESP(plot,slotNum)
+    clearSlotESP()
+    local model=findBrainrotAtSlot(plot,slotNum); if not model then return end
+    local hl=Instance.new("Highlight")
+    hl.FillTransparency=0.25; hl.OutlineTransparency=0
+    hl.FillColor=rbw(); hl.OutlineColor=Color3.fromRGB(255,255,255)
+    hl.Adornee=model; hl.Parent=workspace
+    slotESPHighlight=hl
+    local anchor=model:IsA("Model")and(model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart"))or model
+    local bb=Instance.new("BillboardGui")
+    bb.AlwaysOnTop=true; bb.Size=UDim2.new(0,200,0,46)
+    bb.StudsOffset=Vector3.new(0,5,0); bb.Adornee=anchor; bb.Parent=workspace
+    slotESPBillboard=bb
+    local lbl=Instance.new("TextLabel",bb)
+    lbl.Size=UDim2.new(1,0,1,0); lbl.BackgroundTransparency=1
+    lbl.Font=Enum.Font.GothamBold; lbl.TextSize=14
+    lbl.TextColor3=Color3.new(1,1,1); lbl.TextStrokeTransparency=0; lbl.TextStrokeColor3=Color3.new(0,0,0)
+    lbl.Text="🎯 Slot "..slotNum.." — CIBLE TP"
+    RunService.Heartbeat:Connect(function()
+        if hl and hl.Parent then hl.FillColor=rbw() end
+        if lbl and lbl.Parent then lbl.TextColor3=rbw() end
+    end)
+end
+
+-- ════════════════════════════════════════════════════════════
+-- GUI — STRUCTURE PRINCIPALE AVEC SCROLL
+-- ════════════════════════════════════════════════════════════
+-- Le principe :
+--   • Frame (170×320) = fenêtre visible fixe avec ClipsDescendants
+--   • ContentFrame (170×(tout le contenu)) glisse à l'intérieur
+--   • Boutons ▲ / ▼ en dehors du clip, toujours visibles
+-- ════════════════════════════════════════════════════════════
+
+local PANEL_W       = 170   -- largeur visible
+local PANEL_H       = 300   -- hauteur visible (fenêtre)
+local CONTENT_H     = 360   -- hauteur totale du contenu
+local SCROLL_STEP   = 40    -- pixels par clic de flèche
+local scrollOffset  = 0     -- position actuelle du scroll (0 = haut)
+
+local ScreenGui = Instance.new("ScreenGui",PlayerGui)
+ScreenGui.Name="HyzerTpBlock"; ScreenGui.ResetOnSpawn=false
+
+-- ── Conteneur extérieur (clip window) ───────────────────────
+local OuterFrame = Instance.new("Frame",ScreenGui)
+OuterFrame.Size             = UDim2.new(0,PANEL_W,0,PANEL_H)
+OuterFrame.Position         = UDim2.new(0.5,-PANEL_W/2,0.5,-PANEL_H/2)
+OuterFrame.BackgroundColor3 = Color3.fromRGB(8,4,18)
+OuterFrame.BorderSizePixel  = 0
+OuterFrame.ClipsDescendants = true
+OuterFrame.Active           = true
+OuterFrame.Draggable        = true
+Instance.new("UICorner",OuterFrame).CornerRadius=UDim.new(0,12)
+local outerStroke=Instance.new("UIStroke",OuterFrame)
+outerStroke.Thickness=1.5; outerStroke.Color=Color3.fromRGB(120,0,255)
+
+-- ── Contenu scrollable ───────────────────────────────────────
+local ContentFrame = Instance.new("Frame",OuterFrame)
+ContentFrame.Size             = UDim2.new(0,PANEL_W,0,CONTENT_H)
+ContentFrame.Position         = UDim2.new(0,0,0,0)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.BorderSizePixel  = 0
+
+-- ── Motif animé (dans ContentFrame) ─────────────────────────
+local PatternCanvas=Instance.new("Frame",ContentFrame)
+PatternCanvas.Size=UDim2.new(1,0,1,0); PatternCanvas.BackgroundTransparency=1; PatternCanvas.ZIndex=1
+
+local patternShapes={}
+for row=0,13 do for col=0,6 do
+    local dot=Instance.new("Frame",PatternCanvas)
+    dot.Size=UDim2.new(0,5,0,5)
+    dot.Position=UDim2.new(0,col*28-4+(row%2)*14,0,row*28-4)
+    dot.BackgroundColor3=Color3.fromRGB(80,0,180)
+    dot.BackgroundTransparency=0.55; dot.BorderSizePixel=0; dot.ZIndex=1
+    Instance.new("UICorner",dot).CornerRadius=UDim.new(1,0)
+    table.insert(patternShapes,{dot=dot,baseX=col*28-4+(row%2)*14,baseY=row*28-4,phase=(col+row)*0.4})
+end end
+
+local diagLines={}
+for i=0,4 do
+    local line=Instance.new("Frame",PatternCanvas)
+    line.Size=UDim2.new(0,1,1,60); line.Position=UDim2.new(0,i*42-20,0,-30)
+    line.BackgroundColor3=Color3.fromRGB(100,0,220); line.BackgroundTransparency=0.72
+    line.BorderSizePixel=0; line.ZIndex=1; line.Rotation=25
+    table.insert(diagLines,{line=line,baseX=i*42-20,phase=i*1.1})
+end
+
+local Overlay=Instance.new("Frame",ContentFrame)
+Overlay.Size=UDim2.new(1,0,1,0); Overlay.BackgroundColor3=Color3.fromRGB(8,4,18)
+Overlay.BackgroundTransparency=0.18; Overlay.BorderSizePixel=0; Overlay.ZIndex=2
+Instance.new("UICorner",Overlay).CornerRadius=UDim.new(0,12)
+
+-- ── Barre titre ──────────────────────────────────────────────
+local TitleBar=Instance.new("Frame",ContentFrame)
+TitleBar.Size=UDim2.new(1,0,0,32); TitleBar.BackgroundColor3=Color3.fromRGB(30,0,70)
+TitleBar.BorderSizePixel=0; TitleBar.ZIndex=3
+Instance.new("UICorner",TitleBar).CornerRadius=UDim.new(0,12)
+local TitleFix=Instance.new("Frame",ContentFrame)
+TitleFix.Size=UDim2.new(1,0,0,16); TitleFix.Position=UDim2.new(0,0,0,18)
+TitleFix.BackgroundColor3=Color3.fromRGB(30,0,70); TitleFix.BorderSizePixel=0; TitleFix.ZIndex=3
+local TitleGrad=Instance.new("UIGradient",TitleBar)
+TitleGrad.Color=ColorSequence.new{
+    ColorSequenceKeypoint.new(0,Color3.fromRGB(80,0,200)),
+    ColorSequenceKeypoint.new(0.5,Color3.fromRGB(140,0,255)),
+    ColorSequenceKeypoint.new(1,Color3.fromRGB(60,0,160)),
+}; TitleGrad.Rotation=90
+
+local TitleLabel=Instance.new("TextLabel",ContentFrame)
+TitleLabel.Size=UDim2.new(1,-10,0,32); TitleLabel.Position=UDim2.new(0,5,0,0)
+TitleLabel.BackgroundTransparency=1; TitleLabel.Text="✦ Hyzer Tp-Block ✦"
+TitleLabel.Font=Enum.Font.GothamBold; TitleLabel.TextSize=12
+TitleLabel.TextColor3=Color3.fromRGB(230,200,255)
+TitleLabel.TextXAlignment=Enum.TextXAlignment.Center; TitleLabel.ZIndex=4
+
+-- ── Helpers bouton / label ───────────────────────────────────
+local function makeBtn(text,posY,h)
+    h=h or 24
+    local btn=Instance.new("TextButton",ContentFrame)
+    btn.Size=UDim2.new(0,134,0,h); btn.Position=UDim2.new(0,18,0,posY)
+    btn.Text=text; btn.TextColor3=Color3.fromRGB(220,200,255)
+    btn.Font=Enum.Font.GothamBold; btn.TextSize=11
+    btn.BackgroundColor3=Color3.fromRGB(28,6,60); btn.BorderSizePixel=0
+    btn.ZIndex=5; btn.AutoButtonColor=false
+    Instance.new("UICorner",btn).CornerRadius=UDim.new(0,6)
+    local s=Instance.new("UIStroke",btn); s.Color=Color3.fromRGB(100,0,220); s.Thickness=1
+    btn.MouseEnter:Connect(function() btn.BackgroundColor3=Color3.fromRGB(50,10,110) end)
+    btn.MouseLeave:Connect(function() btn.BackgroundColor3=Color3.fromRGB(28,6,60) end)
+    return btn
+end
+
+local function makeLbl(text,posY,sz)
+    local lbl=Instance.new("TextLabel",ContentFrame)
+    lbl.Size=UDim2.new(1,-20,0,sz or 14); lbl.Position=UDim2.new(0,10,0,posY)
+    lbl.Text=text; lbl.TextColor3=Color3.fromRGB(180,150,255)
+    lbl.Font=Enum.Font.Gotham; lbl.TextSize=9
+    lbl.BackgroundTransparency=1; lbl.TextXAlignment=Enum.TextXAlignment.Left; lbl.ZIndex=5
+    return lbl
+end
+
+local function makeSep(posY)
+    local s=Instance.new("Frame",ContentFrame)
+    s.Size=UDim2.new(1,-20,0,1); s.Position=UDim2.new(0,10,0,posY)
+    s.BackgroundColor3=Color3.fromRGB(100,0,220); s.BorderSizePixel=0; s.ZIndex=5
+    return s
+end
+
+-- ════════════════════════════════════════════════════════════
+-- CONTENU (positionné dans ContentFrame)
+-- ════════════════════════════════════════════════════════════
+-- Y=38  Teleport
+-- Y=67  Keybind
+-- Y=96  Auto Block
+-- Y=126 Delay label
+-- Y=141 Delay textbox + Set
+-- Y=165 Current delay
+-- Y=182 Block All
+-- ─ sep Y=210
+-- Y=218 Slot label
+-- Y=236 Slot selector
+-- Y=266 Tp Block
+-- ─ sep Y=296
+-- Y=304 Auto Grab
+
+local TeleportButton  = makeBtn("⟶  Teleport",    38)
+local KeybindButton   = makeBtn("⌨  Keybind: [F]",67)
+local AutoBlockButton = makeBtn("⛔  Auto: ON",    96)
+
+local DelayLabel=makeLbl("Block Delay:",126)
+
+local DelayTextBox=Instance.new("TextBox",ContentFrame)
+DelayTextBox.Size=UDim2.new(0,74,0,20); DelayTextBox.Position=UDim2.new(0,18,0,141)
+DelayTextBox.Text=tostring(blockDelay); DelayTextBox.TextColor3=Color3.fromRGB(220,200,255)
+DelayTextBox.Font=Enum.Font.Gotham; DelayTextBox.TextSize=11
+DelayTextBox.BackgroundColor3=Color3.fromRGB(28,6,60)
+DelayTextBox.PlaceholderText="0.1-5.0"; DelayTextBox.PlaceholderColor3=Color3.fromRGB(120,100,160)
+DelayTextBox.BorderSizePixel=0; DelayTextBox.ZIndex=5
+Instance.new("UICorner",DelayTextBox).CornerRadius=UDim.new(0,5)
+Instance.new("UIStroke",DelayTextBox).Color=Color3.fromRGB(100,0,220)
+
+local SetDelayButton=Instance.new("TextButton",ContentFrame)
+SetDelayButton.Size=UDim2.new(0,44,0,20); SetDelayButton.Position=UDim2.new(0,106,0,141)
+SetDelayButton.Text="Set"; SetDelayButton.TextColor3=Color3.fromRGB(220,200,255)
+SetDelayButton.Font=Enum.Font.GothamBold; SetDelayButton.TextSize=10
+SetDelayButton.BackgroundColor3=Color3.fromRGB(60,0,140); SetDelayButton.BorderSizePixel=0
+SetDelayButton.ZIndex=5; SetDelayButton.AutoButtonColor=false
+Instance.new("UICorner",SetDelayButton).CornerRadius=UDim.new(0,5)
+
+local CurrentDelayLabel=makeLbl("Delay: 0.7s",165)
+CurrentDelayLabel.TextXAlignment=Enum.TextXAlignment.Center
+CurrentDelayLabel.Size=UDim2.new(1,-20,0,14)
+
+local BlockAllButton=makeBtn("💀  Block All",182)
+
+makeSep(210)
+
+-- Section slot
+local SlotSectionLabel=makeLbl("📍 Position Brainrot",218,14)
+SlotSectionLabel.TextColor3=Color3.fromRGB(200,170,255)
+SlotSectionLabel.TextXAlignment=Enum.TextXAlignment.Center
+SlotSectionLabel.Size=UDim2.new(1,-20,0,14)
+
+local SlotLeftBtn=Instance.new("TextButton",ContentFrame)
+SlotLeftBtn.Size=UDim2.new(0,22,0,22); SlotLeftBtn.Position=UDim2.new(0,18,0,236)
+SlotLeftBtn.Text="<"; SlotLeftBtn.TextColor3=Color3.fromRGB(200,170,255)
+SlotLeftBtn.Font=Enum.Font.GothamBold; SlotLeftBtn.TextSize=14
+SlotLeftBtn.BackgroundColor3=Color3.fromRGB(28,6,60); SlotLeftBtn.BorderSizePixel=0
+SlotLeftBtn.ZIndex=5; SlotLeftBtn.AutoButtonColor=false
+Instance.new("UICorner",SlotLeftBtn).CornerRadius=UDim.new(0,5)
+Instance.new("UIStroke",SlotLeftBtn).Color=Color3.fromRGB(100,0,220)
+
+local SlotLabel=Instance.new("TextLabel",ContentFrame)
+SlotLabel.Size=UDim2.new(0,82,0,22); SlotLabel.Position=UDim2.new(0,44,0,236)
+SlotLabel.Text="Emplacement : 1"; SlotLabel.TextColor3=Color3.fromRGB(230,210,255)
+SlotLabel.Font=Enum.Font.GothamBold; SlotLabel.TextSize=9
+SlotLabel.BackgroundColor3=Color3.fromRGB(20,5,45); SlotLabel.BorderSizePixel=0
+SlotLabel.ZIndex=5; SlotLabel.TextXAlignment=Enum.TextXAlignment.Center
+Instance.new("UICorner",SlotLabel).CornerRadius=UDim.new(0,5)
+
+local SlotRightBtn=Instance.new("TextButton",ContentFrame)
+SlotRightBtn.Size=UDim2.new(0,22,0,22); SlotRightBtn.Position=UDim2.new(0,130,0,236)
+SlotRightBtn.Text=">"; SlotRightBtn.TextColor3=Color3.fromRGB(200,170,255)
+SlotRightBtn.Font=Enum.Font.GothamBold; SlotRightBtn.TextSize=14
+SlotRightBtn.BackgroundColor3=Color3.fromRGB(28,6,60); SlotRightBtn.BorderSizePixel=0
+SlotRightBtn.ZIndex=5; SlotRightBtn.AutoButtonColor=false
+Instance.new("UICorner",SlotRightBtn).CornerRadius=UDim.new(0,5)
+Instance.new("UIStroke",SlotRightBtn).Color=Color3.fromRGB(100,0,220)
+
+local TpBlockButton=makeBtn("🚀  Tp Block",266,24)
+TpBlockButton.BackgroundColor3=Color3.fromRGB(50,0,120)
+local tpStroke=Instance.new("UIStroke",TpBlockButton)
+tpStroke.Color=Color3.fromRGB(178,1,255); tpStroke.Thickness=1.4
+
+makeSep(298)
+
+local AutoGrabButton=makeBtn("🐾  Auto Grab: OFF",306,24)
+AutoGrabButton.BackgroundColor3=Color3.fromRGB(40,0,90)
+local agStroke=Instance.new("UIStroke",AutoGrabButton)
+agStroke.Color=Color3.fromRGB(178,1,255); agStroke.Thickness=1.2
+
+-- ════════════════════════════════════════════════════════════
+-- BOUTONS SCROLL  ▲ / ▼  (dans ScreenGui, hors clip)
+-- ════════════════════════════════════════════════════════════
+local function makeScrollBtn(symbol, anchorY)
+    local btn=Instance.new("TextButton",ScreenGui)
+    btn.Size=UDim2.new(0,22,0,22)
+    -- Se positionne à droite du panel, aligné verticalement
+    btn.Position=UDim2.new(0.5, PANEL_W/2+4, 0, 0)  -- X fixé, Y calculé ci-dessous
+    btn.AnchorPoint=Vector2.new(0,0)
+    btn.Text=symbol; btn.TextColor3=Color3.fromRGB(220,200,255)
+    btn.Font=Enum.Font.GothamBold; btn.TextSize=14
+    btn.BackgroundColor3=Color3.fromRGB(40,0,100); btn.BorderSizePixel=0
+    btn.ZIndex=20; btn.AutoButtonColor=false
+    Instance.new("UICorner",btn).CornerRadius=UDim.new(0,6)
+    local s=Instance.new("UIStroke",btn); s.Color=Color3.fromRGB(140,0,255); s.Thickness=1.2
+    btn.MouseEnter:Connect(function() btn.BackgroundColor3=Color3.fromRGB(70,10,160) end)
+    btn.MouseLeave:Connect(function() btn.BackgroundColor3=Color3.fromRGB(40,0,100) end)
+    return btn
+end
+
+local ScrollUpBtn   = makeScrollBtn("▲", 0)
+local ScrollDownBtn = makeScrollBtn("▼", 0)
+
+-- Fonction qui repositionne les boutons scroll selon OuterFrame
+local function syncScrollBtnPositions()
+    local op = OuterFrame.Position
+    local ox = op.X.Offset  -- offset pixel
+    local oy = op.Y.Offset
+
+    -- ▲ : en haut à droite du panel
+    ScrollUpBtn.Position   = UDim2.new(op.X.Scale, ox + PANEL_W + 4, op.Y.Scale, oy + 4)
+    -- ▼ : juste en dessous de ▲
+    ScrollDownBtn.Position = UDim2.new(op.X.Scale, ox + PANEL_W + 4, op.Y.Scale, oy + 30)
+end
+syncScrollBtnPositions()
+
+-- Resync quand le panel est déplacé (Draggable change Position)
+OuterFrame:GetPropertyChangedSignal("Position"):Connect(syncScrollBtnPositions)
+
+-- ── Logique scroll ───────────────────────────────────────────
+local maxScroll = CONTENT_H - PANEL_H   -- 360 - 300 = 60
+
+local function applyScroll(newOffset)
+    newOffset = math.clamp(newOffset, 0, maxScroll)
+    scrollOffset = newOffset
+    TweenService:Create(ContentFrame, TweenInfo.new(0.12, Enum.EasingStyle.Quad),
+        {Position = UDim2.new(0,0,0,-scrollOffset)}):Play()
+    -- Indicateur visuel sur les boutons
+    ScrollUpBtn.TextColor3   = scrollOffset>0
+        and Color3.fromRGB(200,160,255) or Color3.fromRGB(80,60,100)
+    ScrollDownBtn.TextColor3 = scrollOffset<maxScroll
+        and Color3.fromRGB(200,160,255) or Color3.fromRGB(80,60,100)
+end
+
+ScrollUpBtn.MouseButton1Click:Connect(function()
+    applyScroll(scrollOffset - SCROLL_STEP)
+end)
+ScrollDownBtn.MouseButton1Click:Connect(function()
+    applyScroll(scrollOffset + SCROLL_STEP)
+end)
+
+-- Scroll molette souris sur le panel
+OuterFrame.InputChanged:Connect(function(inp)
+    if inp.UserInputType==Enum.UserInputType.MouseWheel then
+        applyScroll(scrollOffset - inp.Position.Z * SCROLL_STEP)
+    end
+end)
+
+applyScroll(0)  -- init couleurs
+
+-- ── Minimize ─────────────────────────────────────────────────
+local ToggleCircle=Instance.new("ImageButton",ScreenGui)
+ToggleCircle.Size=UDim2.new(0,38,0,38); ToggleCircle.Position=UDim2.new(0,10,0,10)
+ToggleCircle.BackgroundColor3=Color3.fromRGB(40,0,100); ToggleCircle.BackgroundTransparency=0.1
+ToggleCircle.Image="rbxassetid://6034834113"; ToggleCircle.ImageColor3=Color3.fromRGB(200,160,255)
+ToggleCircle.ZIndex=10; ToggleCircle.Active=true; ToggleCircle.Draggable=true
+Instance.new("UICorner",ToggleCircle).CornerRadius=UDim.new(1,0)
+local tcStroke=Instance.new("UIStroke",ToggleCircle)
+tcStroke.Color=Color3.fromRGB(140,0,255); tcStroke.Thickness=1.5
+
+ToggleCircle.MouseButton1Click:Connect(function()
+    OuterFrame.Visible=not OuterFrame.Visible
+    ScrollUpBtn.Visible=OuterFrame.Visible
+    ScrollDownBtn.Visible=OuterFrame.Visible
+    ToggleCircle.Image=OuterFrame.Visible and "rbxassetid://6034834113" or "rbxassetid://6034835320"
+end)
+
+-- ════════════════════════════════════════════════════════════
+-- ANIMATIONS
+-- ════════════════════════════════════════════════════════════
+RunService.Heartbeat:Connect(function(dt)
+    rainbowClock=rainbowClock+dt
+    outerStroke.Color=rbw(); tcStroke.Color=rbw(); agStroke.Color=rbw(); tpStroke.Color=rbw()
+    TitleLabel.TextColor3=rbw(); TitleGrad.Rotation=(rainbowClock*40)%360
+    -- Scroll btns arc-en-ciel
+    local sc=Instance.new("UIStroke") -- dummy trick : on update directement le stroke
+    for _,sb in ipairs({ScrollUpBtn,ScrollDownBtn}) do
+        for _,ch in ipairs(sb:GetChildren()) do
+            if ch:IsA("UIStroke") then ch.Color=rbw() end
+        end
+    end
+    for _,s in ipairs(patternShapes) do
+        local t=rainbowClock+s.phase
+        local ox=math.sin(t*0.9)*5; local oy=math.cos(t*0.7)*5
+        local sc2=0.4+math.abs(math.sin(t*1.2))*0.5
+        s.dot.Position=UDim2.new(0,s.baseX+ox,0,s.baseY+oy)
+        s.dot.Size=UDim2.new(0,4+sc2*3,0,4+sc2*3)
+        s.dot.BackgroundColor3=hsv(((rainbowClock*0.25+s.phase*0.15)%1),1,1)
+        s.dot.BackgroundTransparency=0.3+sc2*0.35
+    end
+    for _,dl in ipairs(diagLines) do
+        local t=rainbowClock*0.5+dl.phase
+        dl.line.Position=UDim2.new(0,dl.baseX+math.sin(t)*18,0,-30)
+        dl.line.BackgroundColor3=hsv(((rainbowClock*0.2+dl.phase*0.1)%1),1,1)
+        dl.line.BackgroundTransparency=0.6+math.abs(math.sin(t*1.3))*0.25
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════
+-- HELPERS RAGERHUB
+-- ════════════════════════════════════════════════════════════
+local function updateAutoBlockUI()
+    if autoBlockEnabled then
+        AutoBlockButton.Text="⛔  Auto: ON"; AutoBlockButton.BackgroundColor3=Color3.fromRGB(50,0,110)
+    else
+        AutoBlockButton.Text="⛔  Auto: OFF"; AutoBlockButton.BackgroundColor3=Color3.fromRGB(20,4,45)
+    end
+end
+
+local function setBlockDelay()
+    local num=tonumber(DelayTextBox.Text)
+    if num then
+        blockDelay=math.clamp(math.floor(num*100+0.5)/100,minDelay,maxDelay)
+        DelayTextBox.Text=tostring(blockDelay)
+        CurrentDelayLabel.Text="Delay: "..tostring(blockDelay).."s"
+        DelayTextBox.BackgroundColor3=Color3.fromRGB(28,6,60)
+    else
+        DelayTextBox.Text=tostring(blockDelay)
+        DelayTextBox.BackgroundColor3=Color3.fromRGB(28,6,60)
+    end
+end
+
+DelayTextBox:GetPropertyChangedSignal("Text"):Connect(function()
+    local num=tonumber(DelayTextBox.Text)
+    DelayTextBox.BackgroundColor3=(num and num>=minDelay and num<=maxDelay)
+        and Color3.fromRGB(0,50,20) or Color3.fromRGB(60,0,0)
+end)
+
+-- ════════════════════════════════════════════════════════════
+-- CORE
+-- ════════════════════════════════════════════════════════════
+local function FastClick()
+    task.wait(blockDelay)
+    local cam=workspace.CurrentCamera.ViewportSize
+    local x,y=cam.X/2,cam.Y/2+23
+    for _=1,8 do
+        VirtualInputManager:SendMouseButtonEvent(x,y,0,true,game,1)
+        VirtualInputManager:SendMouseButtonEvent(x,y,0,false,game,1)
+        task.wait(0.008)
+    end
+end
+
+local function blockPlayer(plr)
+    if not plr or plr==player then return end
+    pcall(function() StarterGui:SetCore("PromptBlockPlayer",plr) end)
+end
+
+local function equipFlyingCarpet()
+    local tool=backpack:FindFirstChild(REQUIRED_TOOL) or char:FindFirstChild(REQUIRED_TOOL)
+    if not tool then warn("Flying Carpet not found") return false end
+    if tool.Parent~=char then
+        humanoid:EquipTool(tool)
+        local t=tick()
+        repeat task.wait() until tool.Parent==char or tick()-t>3
+    end
+    return true
+end
+
+local function blockAllPlayers()
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr~=player then blockPlayer(plr); FastClick(); task.wait(0.25) end
+    end
+end
+
+local FLAGGED_TOOLS={"brainrot","animal","monkey","dog","cat","bird"}
+local function isFlagged(name)
+    name=name:lower()
+    for _,kw in ipairs(FLAGGED_TOOLS) do if name:find(kw) then return true end end
+    return false
+end
+
+local function checkAndBlockFlaggedPlayers()
+    if not autoBlockEnabled then return end
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr~=player and plr.Character then
+            for _,obj in ipairs(plr.Character:GetChildren()) do
+                if obj:IsA("Tool") and isFlagged(obj.Name) then
+                    blockPlayer(plr); FastClick(); task.wait(0.25); break
+                end
+            end
+        end
+    end
+end
+
+local function setupBrainrotDetection()
+    checkAndBlockFlaggedPlayers()
+    Players.PlayerAdded:Connect(function(plr)
+        plr.CharacterAdded:Connect(function(c)
+            c.ChildAdded:Connect(function(child)
+                if child:IsA("Tool") and isFlagged(child.Name) and autoBlockEnabled then
+                    task.wait(0.3); blockPlayer(plr); FastClick()
+                end
+            end)
+        end)
+    end)
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr~=player and plr.Character then
+            plr.Character.ChildAdded:Connect(function(child)
+                if child:IsA("Tool") and isFlagged(child.Name) and autoBlockEnabled then
+                    task.wait(0.3); blockPlayer(plr); FastClick()
+                end
+            end)
+        end
+    end
+end
+
+local function teleportAll()
+    if not equipFlyingCarpet() then return end
+    lastTarget=nil
+    for _,plr in ipairs(Players:GetPlayers()) do if plr~=player then lastTarget=plr; break end end
+    for _,spot in ipairs(spots) do equipFlyingCarpet(); hrp.CFrame=spot; task.wait(0.12) end
+    if lastTarget and autoBlockEnabled then blockPlayer(lastTarget); FastClick() end
+end
+
+-- ════════════════════════════════════════════════════════════
+-- SLOT LOGIC
+-- ════════════════════════════════════════════════════════════
+local function refreshSlotDisplay()
+    SlotLabel.Text="Emplacement : "..selectedSlot
+    local _,plot=findCloneInBases()
+    if plot then showSlotESP(plot,selectedSlot) else clearSlotESP() end
+end
+
+SlotLeftBtn.MouseButton1Click:Connect(function()
+    selectedSlot=selectedSlot-1; if selectedSlot<1 then selectedSlot=10 end; refreshSlotDisplay()
+end)
+SlotRightBtn.MouseButton1Click:Connect(function()
+    selectedSlot=selectedSlot+1; if selectedSlot>10 then selectedSlot=1 end; refreshSlotDisplay()
+end)
+
+-- ════════════════════════════════════════════════════════════
+-- TP BLOCK
+-- ════════════════════════════════════════════════════════════
+TpBlockButton.MouseButton1Click:Connect(function()
+    local ownerPlr,plot=findCloneInBases()
+    if not plot then
+        TpBlockButton.Text="❌ Clone introuvable"; task.wait(1.5); TpBlockButton.Text="🚀  Tp Block"; return
+    end
+    local brainrotPos=getBrainrotPosition(plot,selectedSlot)
+    if not brainrotPos then
+        TpBlockButton.Text="❌ Slot "..selectedSlot.." vide"; task.wait(1.5); TpBlockButton.Text="🚀  Tp Block"; return
+    end
+    TpBlockButton.Text="⏳ Téléportation..."
+    if not equipFlyingCarpet() then
+        TpBlockButton.Text="❌ Pas de carpet"; task.wait(1.5); TpBlockButton.Text="🚀  Tp Block"; return
+    end
+    hrp.CFrame=CFrame.new(brainrotPos+Vector3.new(0,0,4))*CFrame.Angles(0,math.rad(180),0)
+    task.wait(0.15)
+    if ownerPlr then blockPlayer(ownerPlr); FastClick() end
+    TpBlockButton.Text="✅ Fait !"; task.wait(1.2); TpBlockButton.Text="🚀  Tp Block"
+end)
+
+-- ════════════════════════════════════════════════════════════
+-- RYZE SYNCHRONIZER
+-- ════════════════════════════════════════════════════════════
+local function getInternalTable()
+    local Packages=ReplicatedStorage:FindFirstChild("Packages"); if not Packages then return nil end
+    local SynMod=Packages:FindFirstChild("Synchronizer");        if not SynMod   then return nil end
+    local ok,syn=pcall(require,SynMod);                          if not ok or not syn then return nil end
+    local Get=syn.Get; if type(Get)~="function" then return nil end
+    for i=1,5 do
+        local s,u=pcall(getupvalue,Get,i)
+        if s and type(u)=="table" then
+            if u.___private or u.___channels or u.___data then return u end
+            for k,v in pairs(u) do if type(k)=="string" and k:match("^Plot_") or type(v)=="table" then return u end end
+        end
+    end
+    local s,e=pcall(getfenv,Get); if s and e and e.self then return e.self end
+    return nil
+end
+
+local SyncInt={_cache={},_data=nil}
+task.spawn(function()
+    for i=1,10 do SyncInt._data=getInternalTable(); if SyncInt._data then break end; task.wait(1) end
+end)
+
+local function stealthGet(n)
+    if not n or type(n)~="string" then return nil end
+    if SyncInt._cache[n]==false then return nil end
+    if SyncInt._data then
+        for _,k in ipairs({n,"Plot_"..n,"Plot"..n,n.."_Channel","Channel_"..n}) do
+            if SyncInt._data[k] then SyncInt._cache[n]=SyncInt._data[k]; return SyncInt._data[k] end
+        end
+        for k,v in pairs(SyncInt._data) do
+            if type(k)=="string" and (k==n or k:find(n,1,true)) and type(v)=="table" then
+                SyncInt._cache[n]=v; return v
+            end
+        end
+    end
+    SyncInt._cache[n]=false; return nil
+end
+
+local function sProp(ch,p)
+    if not ch or type(ch)~="table" then return nil end
+    if ch[p] then return ch[p] end
+    if type(ch.Get)=="function" then local ok,r=pcall(ch.Get,ch,p); if ok then return r end end
+    local alts={Owner={"owner","Owner","plotOwner","PlotOwner"},AnimalList={"animalList","AnimalList","animals","Animals","pets"}}
+    if alts[p] then for _,a in ipairs(alts[p]) do if ch[a] then return ch[a] end end end
+    return nil
+end
+
+local Datas =ReplicatedStorage:WaitForChild("Datas")
+local Shared=ReplicatedStorage:WaitForChild("Shared")
+local Utils =ReplicatedStorage:WaitForChild("Utils")
+
+local AnimalsData,AnimalsShared,NumberUtils
+task.spawn(function()
+    for i=1,10 do
+        local s1,d =pcall(require,Datas:WaitForChild("Animals"))
+        local s2,sh=pcall(require,Shared:WaitForChild("Animals"))
+        local s3,nu=pcall(require,Utils:WaitForChild("NumberUtils"))
+        if s1 and d  then AnimalsData=d   end
+        if s2 and sh then AnimalsShared=sh end
+        if s3 and nu then NumberUtils=nu  end
+        if AnimalsData and AnimalsShared and NumberUtils then break end
+        task.wait(0.5)
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════
+-- RYZE STATE
+-- ════════════════════════════════════════════════════════════
+local allAnimals={};local plotChannels={};local lastHash={};local PromptCache={};local StealCache={}
+local grabAutoMode=true;local grabSelIdx=1;local grabEnabled=false;local espObjects={}
+local TRIGGER_DIST=10;local CHARGE_SPEED=70;local DIP_AMOUNT=8;local DIP_SPEED=100;local RUSH_SPEED=420;local STEAL_COOLDOWN=0.4
+local stealPct=0;local stealTarget=nil;local stealPhase="idle";local dipTarget=0;local lastStealTime=0;local stealFiring=false
+
+local function updateAutoGrabButton()
+    if grabEnabled then
+        AutoGrabButton.Text="🐾  Auto Grab: ON"; AutoGrabButton.BackgroundColor3=Color3.fromRGB(70,0,150)
+    else
+        AutoGrabButton.Text="🐾  Auto Grab: OFF"; AutoGrabButton.BackgroundColor3=Color3.fromRGB(40,0,90)
+    end
+end
+
+local function isMyBase(ad)
+    if not ad or not ad.plot then return false end
+    local plots=workspace:FindFirstChild("Plots"); if not plots then return false end
+    local plot=plots:FindFirstChild(ad.plot);     if not plot  then return false end
+    local ch=stealthGet(plot.Name)
+    if ch then
+        local o=sProp(ch,"Owner")
+        if o then
+            if typeof(o)=="Instance" and o:IsA("Player") then return o.UserId==player.UserId end
+            if type(o)=="table" and o.UserId             then return o.UserId==player.UserId end
+            if typeof(o)=="Instance"                     then return o==player end
+        end
+    end
+    local sign=plot:FindFirstChild("PlotSign")
+    if sign then local yb=sign:FindFirstChild("YourBase"); if yb and yb:IsA("BillboardGui") then return yb.Enabled end end
+    return false
+end
+
+local function findPetModel(ad)
+    if not ad then return nil end
+    local plots=workspace:FindFirstChild("Plots"); if not plots then return nil end
+    local plot=plots:FindFirstChild(ad.plot);     if not plot  then return nil end
+    local pods=plot:FindFirstChild("AnimalPodiums"); if not pods then return nil end
+    local pod=pods:FindFirstChild(ad.slot);       if not pod   then return nil end
+    local base=pod:FindFirstChild("Base"); if not base then return nil end
+    local spwn=base:FindFirstChild("Spawn"); if not spwn then return nil end
+    for _,c in ipairs(spwn:GetChildren()) do if c:IsA("Model") or c:IsA("BasePart") then return c end end
+    local function df(p)
+        for _,c in ipairs(p:GetChildren()) do
+            if c:IsA("Model") or (c:IsA("BasePart") and c.Name~="Base") then return c end
+            local r=df(c); if r then return r end
+        end; return nil
+    end
+    return df(pod)
+end
+
+local function getPetPosition(ad)
+    local m=findPetModel(ad); if not m then return nil end
+    if m:IsA("Model") then
+        if m.PrimaryPart then return m.PrimaryPart.Position end
+        local ok,cf=pcall(function() return m:GetBoundingBox() end)
+        if ok and cf then return cf.Position end
+        local p=m:FindFirstChildWhichIsA("BasePart"); if p then return p.Position end
+    elseif m:IsA("BasePart") then return m.Position end
+    return nil
+end
+
+local function getPlayerPos()
+    local c=player.Character; if not c then return nil end
+    local h=c:FindFirstChild("HumanoidRootPart"); if not h then return nil end
+    return h.Position
+end
+
+local function distToTarget(ad)
+    local pp=getPetPosition(ad); if not pp then return math.huge end
+    local lp=getPlayerPos();     if not lp then return math.huge end
+    return (pp-lp).Magnitude
+end
+
+local function clearESP(uid)
+    if espObjects[uid] then
+        local e=espObjects[uid]
+        if e.hl and e.hl.Parent then e.hl:Destroy() end
+        if e.bb and e.bb.Parent then e.bb:Destroy() end
+        espObjects[uid]=nil
+    end
+end
+local function clearAllESP() for uid in pairs(espObjects) do clearESP(uid) end end
+
+local function applyESP(ad)
+    if not ad then return end; clearESP(ad.uid)
+    local model=findPetModel(ad); if not model then return end
+    local hl=Instance.new("Highlight")
+    hl.FillTransparency=0.3; hl.OutlineTransparency=0
+    hl.FillColor=rbw(); hl.OutlineColor=rbw(); hl.Adornee=model; hl.Parent=workspace
+    local anchor=model:IsA("Model")and(model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart"))or model
+    local bb=Instance.new("BillboardGui")
+    bb.AlwaysOnTop=true; bb.Size=UDim2.new(0,180,0,38)
+    bb.StudsOffset=Vector3.new(0,4,0); bb.Adornee=anchor; bb.Parent=workspace
+    local lbl=Instance.new("TextLabel",bb)
+    lbl.Size=UDim2.new(1,0,1,0); lbl.BackgroundTransparency=1
+    lbl.Font=Enum.Font.GothamBold; lbl.TextSize=13
+    lbl.TextColor3=Color3.new(1,1,1); lbl.TextStrokeTransparency=0; lbl.TextStrokeColor3=Color3.new(0,0,0)
+    lbl.Text=(ad.name or"?").."\n"..(ad.genText or"")
+    espObjects[ad.uid]={hl=hl,bb=bb,lbl=lbl}
+end
+
+RunService.Heartbeat:Connect(function()
+    local col=rbw()
+    for uid,e in pairs(espObjects) do
+        if e.hl and e.hl.Parent then e.hl.FillColor=col; e.hl.OutlineColor=col else espObjects[uid]=nil end
+        if e.lbl then e.lbl.TextColor3=col end
+    end
+end)
+
+local function refreshESP()
+    clearAllESP(); if not grabEnabled then return end
+    if grabAutoMode then
+        for _,pet in ipairs(allAnimals) do if not isMyBase(pet) then applyESP(pet) end end
+    else local pet=allAnimals[grabSelIdx]; if pet and not isMyBase(pet) then applyESP(pet) end end
+end
+
+local function findPrompt(ad)
+    if not ad then return nil end
+    local c=PromptCache[ad.uid]; if c and c.Parent then return c end
+    local plots=workspace:FindFirstChild("Plots"); if not plots then return nil end
+    local plot=plots:FindFirstChild(ad.plot);     if not plot  then return nil end
+    local pods=plot:FindFirstChild("AnimalPodiums"); if not pods then return nil end
+    local pod=pods:FindFirstChild(ad.slot);        if not pod   then return nil end
+    local base=pod:FindFirstChild("Base");          if not base  then return nil end
+    local spwn=base:FindFirstChild("Spawn");        if not spwn  then return nil end
+    local att=spwn:FindFirstChild("PromptAttachment"); if not att then return nil end
+    for _,p in ipairs(att:GetChildren()) do if p:IsA("ProximityPrompt") then PromptCache[ad.uid]=p; return p end end
+    return nil
+end
+
+local function buildCallbacks(prompt)
+    if StealCache[prompt] then return end
+    local data={hold={},trig={},ready=true}
+    local ok1,c1=pcall(getconnections,prompt.PromptButtonHoldBegan)
+    if ok1 and type(c1)=="table" then for _,c in ipairs(c1) do if type(c.Function)=="function" then table.insert(data.hold,c.Function) end end end
+    local ok2,c2=pcall(getconnections,prompt.Triggered)
+    if ok2 and type(c2)=="table" then for _,c in ipairs(c2) do if type(c.Function)=="function" then table.insert(data.trig,c.Function) end end end
+    if #data.hold>0 or #data.trig>0 then StealCache[prompt]=data end
+end
+
+local function runList(l) for _,fn in ipairs(l) do task.spawn(fn) end end
+local function fireSteal(prompt)
+    local data=StealCache[prompt]; if not data then return end
+    if #data.hold>0 then runList(data.hold) end; task.wait(0.05)
+    if #data.trig>0 then runList(data.trig) end
+end
+
+local function getHash(al)
+    if not al then return "" end
+    local h=""
+    for s,d in pairs(al) do if type(d)=="table" then h=h..tostring(s)..tostring(d.Index)..tostring(d.Mutation) end end
+    return h
+end
+
+local function scanPlot(plot)
+    pcall(function()
+        local uid=plot.Name
+        local ch=stealthGet(uid); if not ch then return end
+        local al=sProp(ch,"AnimalList")
+        local hash=getHash(al)
+        if lastHash[uid]==hash then return end; lastHash[uid]=hash
+        for i=#allAnimals,1,-1 do if allAnimals[i].plot==uid then table.remove(allAnimals,i) end end
+        local owner=sProp(ch,"Owner")
+        if not owner or not Players:FindFirstChild(owner.Name) then return end
+        if owner.UserId==player.UserId then return end
+        if not al then return end
+        for slot,ad in pairs(al) do
+            if type(ad)=="table" then
+                local nm=ad.Index; local info=AnimalsData and AnimalsData[nm]; if not info then continue end
+                local gen=AnimalsShared and AnimalsShared:GetGeneration(nm,ad.Mutation,ad.Traits,nil) or 0
+                local genT="$"..(NumberUtils and NumberUtils:ToString(gen) or tostring(gen)).."/s"
+                table.insert(allAnimals,{name=info.DisplayName or nm,genText=genT,genValue=gen,
+                    mutation=ad.Mutation or "None",owner=owner.Name or "?",
+                    plot=uid,slot=tostring(slot),uid=uid.."_"..tostring(slot)})
+            end
+        end
+        table.sort(allAnimals,function(a,b) return a.genValue>b.genValue end)
+    end)
+end
+
+local function setupPlot(plot)
+    if plotChannels[plot.Name] then return end
+    local ch; for i=1,3 do ch=stealthGet(plot.Name); if ch then break end; task.wait(0.3) end
+    if not ch then return end
+    plotChannels[plot.Name]=true; scanPlot(plot)
+    plot.DescendantAdded:Connect(function()    task.wait(0.05); scanPlot(plot) end)
+    plot.DescendantRemoving:Connect(function() task.wait(0.05); scanPlot(plot) end)
+    task.spawn(function() while plot.Parent and plotChannels[plot.Name] do task.wait(1); scanPlot(plot) end end)
+end
+
+local function initScanner()
+    local plots=workspace:FindFirstChild("Plots")
+    if not plots then
+        for i=1,30 do plots=workspace:FindFirstChild("Plots"); if plots then break end; task.wait(0.5) end
+        if not plots then return end
+    end
+    for _,p in ipairs(plots:GetChildren()) do task.spawn(setupPlot,p) end
+    plots.ChildAdded:Connect(function(p)   task.wait(0.2); task.spawn(setupPlot,p) end)
+    plots.ChildRemoved:Connect(function(p)
+        plotChannels[p.Name]=nil; lastHash[p.Name]=nil
+        for i=#allAnimals,1,-1 do if allAnimals[i].plot==p.Name then table.remove(allAnimals,i) end end
+    end)
+end
+
+-- ════════════════════════════════════════════════════════════
+-- RYZE GUI
+-- ════════════════════════════════════════════════════════════
+local W_G=340;local H_EXP=150;local H_COL=42;local isGrabExpanded=true;local G={}
+
+local function getPetName()
+    if grabAutoMode then return "AUTO" end
+    local p=allAnimals[grabSelIdx]; return p and string.upper(p.name) or "NONE"
+end
+
+local function updateGrabUI()
+    if G.pct  then G.pct.Text=string.format("%.0f%%",stealPct) end
+    if G.bar  then G.bar.Size=UDim2.new(stealPct/100,0,1,0) end
+    if G.badge then
+        if grabEnabled then G.badge.Text="ACTIVÉ";   G.badge.BackgroundColor3=Color3.fromRGB(34,170,34)
+        else               G.badge.Text="DÉSACTIVÉ"; G.badge.BackgroundColor3=Color3.fromRGB(195,22,22) end
+    end
+    if G.petLbl then G.petLbl.Text=getPetName() end
+end
+
+local function createGrabGUI()
+    local old=PlayerGui:FindFirstChild("HyzerAutoGrabUI"); if old then old:Destroy() end
+    local sg=Instance.new("ScreenGui")
+    sg.Name="HyzerAutoGrabUI"; sg.ResetOnSpawn=false
+    sg.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; sg.DisplayOrder=200; sg.IgnoreGuiInset=true; sg.Parent=PlayerGui
+    sg.Enabled=false
+
+    local shadow=Instance.new("ImageLabel")
+    shadow.Size=UDim2.new(0,W_G+30,0,H_EXP+30); shadow.Position=UDim2.new(0.5,-W_G/2-15,0.2,-15)
+    shadow.BackgroundTransparency=1; shadow.Image="rbxassetid://5554236805"
+    shadow.ImageColor3=Color3.fromRGB(60,0,120); shadow.ImageTransparency=0.4
+    shadow.ScaleType=Enum.ScaleType.Slice; shadow.SliceCenter=Rect.new(23,23,277,277); shadow.ZIndex=98; shadow.Parent=sg
+
+    local mf=Instance.new("Frame")
+    mf.Size=UDim2.new(0,W_G,0,H_EXP); mf.Position=UDim2.new(0.5,-W_G/2,0.2,0)
+    mf.BackgroundColor3=Color3.fromRGB(8,4,18); mf.BorderSizePixel=0; mf.ZIndex=100; mf.ClipsDescendants=true; mf.Parent=sg
+    Instance.new("UICorner",mf).CornerRadius=UDim.new(0,12)
+    local mfS=Instance.new("UIStroke"); mfS.Thickness=1.5; mfS.Parent=mf; G.mfStroke=mfS
+
+    local grabPatterns={}
+    for row=0,4 do for col=0,10 do
+        local d=Instance.new("Frame",mf)
+        d.Size=UDim2.new(0,4,0,4); d.Position=UDim2.new(0,col*34-2+(row%2)*17,0,row*34-2)
+        d.BackgroundColor3=Color3.fromRGB(80,0,180); d.BackgroundTransparency=0.6; d.BorderSizePixel=0; d.ZIndex=99
+        Instance.new("UICorner",d).CornerRadius=UDim.new(1,0)
+        table.insert(grabPatterns,{dot=d,bx=col*34-2+(row%2)*17,by=row*34-2,ph=(col+row)*0.5})
+    end end
+    G.grabPatterns=grabPatterns
+
+    local ov=Instance.new("Frame",mf); ov.Size=UDim2.new(1,0,1,0); ov.BackgroundColor3=Color3.fromRGB(8,4,18)
+    ov.BackgroundTransparency=0.2; ov.BorderSizePixel=0; ov.ZIndex=100; Instance.new("UICorner",ov).CornerRadius=UDim.new(0,12)
+
+    local hf=Instance.new("Frame",mf); hf.Size=UDim2.new(1,0,0,44); hf.BackgroundTransparency=1; hf.ZIndex=101
+    local hBar=Instance.new("Frame",mf); hBar.Size=UDim2.new(1,0,0,44); hBar.BackgroundColor3=Color3.fromRGB(30,0,70)
+    hBar.BorderSizePixel=0; hBar.ZIndex=100; Instance.new("UICorner",hBar).CornerRadius=UDim.new(0,12)
+    local hFix=Instance.new("Frame",mf); hFix.Size=UDim2.new(1,0,0,22); hFix.Position=UDim2.new(0,0,0,22)
+    hFix.BackgroundColor3=Color3.fromRGB(30,0,70); hFix.BorderSizePixel=0; hFix.ZIndex=100
+    local hGrad=Instance.new("UIGradient",hBar)
+    hGrad.Color=ColorSequence.new{ColorSequenceKeypoint.new(0,Color3.fromRGB(80,0,200)),ColorSequenceKeypoint.new(1,Color3.fromRGB(60,0,160))}
+    G.hGrad=hGrad
+
+    local titleLbl=Instance.new("TextLabel",mf)
+    titleLbl.Size=UDim2.new(0,180,0,44); titleLbl.Position=UDim2.new(0,14,0,0)
+    titleLbl.BackgroundTransparency=1; titleLbl.Text="✦ Auto Grab ✦"
+    titleLbl.Font=Enum.Font.GothamBold; titleLbl.TextSize=13; titleLbl.TextColor3=Color3.fromRGB(228,218,255)
+    titleLbl.TextXAlignment=Enum.TextXAlignment.Left; titleLbl.ZIndex=102; G.grabTitle=titleLbl
+
+    local pctLbl=Instance.new("TextLabel",mf)
+    pctLbl.Size=UDim2.new(0,44,0,44); pctLbl.Position=UDim2.new(0,190,0,0)
+    pctLbl.BackgroundTransparency=1; pctLbl.Text="0%"; pctLbl.Font=Enum.Font.GothamBold; pctLbl.TextSize=14
+    pctLbl.TextColor3=Color3.fromRGB(178,1,255); pctLbl.TextXAlignment=Enum.TextXAlignment.Left; pctLbl.ZIndex=102; G.pct=pctLbl
+
+    local badge=Instance.new("TextButton",mf)
+    badge.Size=UDim2.new(0,84,0,24); badge.Position=UDim2.new(0,236,0,10)
+    badge.BackgroundColor3=Color3.fromRGB(195,22,22); badge.BorderSizePixel=0
+    badge.Text="DÉSACTIVÉ"; badge.Font=Enum.Font.GothamBold; badge.TextSize=11
+    badge.TextColor3=Color3.fromRGB(255,255,255); badge.AutoButtonColor=false; badge.ZIndex=103
+    Instance.new("UICorner",badge).CornerRadius=UDim.new(0,6); G.badge=badge
+
+    local colBtn=Instance.new("TextButton",mf)
+    colBtn.Size=UDim2.new(0,24,0,24); colBtn.Position=UDim2.new(1,-30,0,10)
+    colBtn.BackgroundTransparency=1; colBtn.Text="–"; colBtn.Font=Enum.Font.GothamBold; colBtn.TextSize=18
+    colBtn.TextColor3=Color3.fromRGB(160,150,200); colBtn.AutoButtonColor=false; colBtn.ZIndex=103
+
+    local barBg=Instance.new("Frame",mf); barBg.Size=UDim2.new(1,0,0,4); barBg.Position=UDim2.new(0,0,0,44)
+    barBg.BackgroundColor3=Color3.fromRGB(20,10,40); barBg.BorderSizePixel=0; barBg.ZIndex=101
+    local barFill=Instance.new("Frame",barBg); barFill.Size=UDim2.new(0,0,1,0); barFill.BackgroundColor3=Color3.fromRGB(120,0,255)
+    barFill.BorderSizePixel=0; barFill.ZIndex=102
+    local barGrad=Instance.new("UIGradient",barFill)
+    barGrad.Color=ColorSequence.new{ColorSequenceKeypoint.new(0,Color3.fromRGB(80,0,200)),ColorSequenceKeypoint.new(1,Color3.fromRGB(200,100,255))}
+    G.bar=barFill; G.barGrad=barGrad
+
+    local sep1=Instance.new("Frame",mf); sep1.Size=UDim2.new(1,0,0,1); sep1.Position=UDim2.new(0,0,0,48)
+    sep1.BackgroundColor3=Color3.fromRGB(80,0,180); sep1.BorderSizePixel=0; sep1.ZIndex=101
+
+    local selRow=Instance.new("Frame",mf); selRow.Size=UDim2.new(1,0,0,60); selRow.Position=UDim2.new(0,0,0,50)
+    selRow.BackgroundTransparency=1; selRow.ZIndex=101
+    local selBg=Instance.new("Frame",selRow); selBg.Size=UDim2.new(1,-24,1,-14); selBg.Position=UDim2.new(0,12,0,7)
+    selBg.BackgroundColor3=Color3.fromRGB(18,8,40); selBg.BorderSizePixel=0; selBg.ZIndex=101
+    Instance.new("UICorner",selBg).CornerRadius=UDim.new(0,8); Instance.new("UIStroke",selBg).Color=Color3.fromRGB(80,0,180)
+
+    local leftBtn=Instance.new("TextButton",selBg); leftBtn.Size=UDim2.new(0,38,1,0); leftBtn.BackgroundTransparency=1
+    leftBtn.Text="<"; leftBtn.Font=Enum.Font.GothamBold; leftBtn.TextSize=20
+    leftBtn.TextColor3=Color3.fromRGB(180,150,255); leftBtn.AutoButtonColor=false; leftBtn.ZIndex=102
+    local rightBtn=Instance.new("TextButton",selBg); rightBtn.Size=UDim2.new(0,38,1,0); rightBtn.Position=UDim2.new(1,-38,0,0)
+    rightBtn.BackgroundTransparency=1; rightBtn.Text=">"; rightBtn.Font=Enum.Font.GothamBold; rightBtn.TextSize=20
+    rightBtn.TextColor3=Color3.fromRGB(180,150,255); rightBtn.AutoButtonColor=false; rightBtn.ZIndex=102
+    local petLbl=Instance.new("TextLabel",selBg); petLbl.Size=UDim2.new(1,-80,1,0); petLbl.Position=UDim2.new(0,40,0,0)
+    petLbl.BackgroundTransparency=1; petLbl.Text="AUTO"; petLbl.Font=Enum.Font.GothamBold; petLbl.TextSize=15
+    petLbl.TextColor3=Color3.fromRGB(220,200,255); petLbl.TextTruncate=Enum.TextTruncate.AtEnd; petLbl.ZIndex=102; G.petLbl=petLbl
+
+    local sep2=Instance.new("Frame",mf); sep2.Size=UDim2.new(1,0,0,1); sep2.Position=UDim2.new(0,0,0,110)
+    sep2.BackgroundColor3=Color3.fromRGB(80,0,180); sep2.BorderSizePixel=0; sep2.ZIndex=101
+    local discLbl=Instance.new("TextLabel",mf); discLbl.Size=UDim2.new(1,-20,0,34); discLbl.Position=UDim2.new(0,10,0,113)
+    discLbl.BackgroundTransparency=1; discLbl.Text="discord.gg/3GAMstNGfX"
+    discLbl.Font=Enum.Font.Gotham; discLbl.TextSize=14; discLbl.TextColor3=Color3.fromRGB(180,150,255)
+    discLbl.TextXAlignment=Enum.TextXAlignment.Center; discLbl.ZIndex=102
+
+    local dragging,dInput,mPos,fPos=false,nil,nil,nil
+    hf.InputBegan:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseButton1 or inp.UserInputType==Enum.UserInputType.Touch then
+            dragging=true; mPos=inp.Position; fPos=mf.Position
+            inp.Changed:Connect(function() if inp.UserInputState==Enum.UserInputState.End then dragging=false end end)
+        end
+    end)
+    hf.InputChanged:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseMovement or inp.UserInputType==Enum.UserInputType.Touch then dInput=inp end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if inp==dInput and dragging then
+            local d=inp.Position-mPos
+            mf.Position=UDim2.new(fPos.X.Scale,fPos.X.Offset+d.X,fPos.Y.Scale,fPos.Y.Offset+d.Y)
+            shadow.Position=UDim2.new(fPos.X.Scale,fPos.X.Offset+d.X-15,fPos.Y.Scale,fPos.Y.Offset+d.Y-15)
+        end
+    end)
+
+    local function setGrabExpand(state)
+        isGrabExpanded=state; colBtn.Text=state and "–" or "+"
+        local th=state and H_EXP or H_COL
+        TweenService:Create(mf,TweenInfo.new(0.15,Enum.EasingStyle.Quad),{Size=UDim2.new(0,W_G,0,th)}):Play()
+        TweenService:Create(shadow,TweenInfo.new(0.15,Enum.EasingStyle.Quad),{Size=UDim2.new(0,W_G+30,0,th+30)}):Play()
+    end
+    colBtn.MouseButton1Click:Connect(function() setGrabExpand(not isGrabExpanded) end)
+
+    local function doGrabToggle()
+        grabEnabled=not grabEnabled
+        if not grabEnabled then clearAllESP(); stealPct=0; stealTarget=nil; stealPhase="idle"; dipTarget=0; stealFiring=false
+        else stealPhase="charging"; refreshESP() end
+        updateGrabUI(); updateAutoGrabButton()
+    end
+    badge.MouseButton1Click:Connect(doGrabToggle)
+
+    local function resetGrabProgress()
+        stealPct=0; stealTarget=nil; stealPhase=grabEnabled and "charging" or "idle"
+        dipTarget=0; stealFiring=false; updateGrabUI(); refreshESP()
+    end
+    leftBtn.MouseButton1Click:Connect(function()
+        if grabAutoMode then grabAutoMode=false; grabSelIdx=math.max(1,#allAnimals)
+        else grabSelIdx=grabSelIdx-1; if grabSelIdx<1 then grabAutoMode=true; grabSelIdx=1 end end
+        resetGrabProgress()
+    end)
+    rightBtn.MouseButton1Click:Connect(function()
+        if grabAutoMode then grabAutoMode=false; grabSelIdx=1
+        else grabSelIdx=grabSelIdx+1; if grabSelIdx>#allAnimals then grabAutoMode=true; grabSelIdx=1 end end
+        resetGrabProgress()
+    end)
+
+    RunService.Heartbeat:Connect(function()
+        if G.barGrad then
+            G.barGrad.Color=ColorSequence.new{
+                ColorSequenceKeypoint.new(0,hsv((rainbowClock*0.3)%1,1,1)),
+                ColorSequenceKeypoint.new(1,hsv((rainbowClock*0.3+0.5)%1,1,1)),
+            }
+        end
+        if G.mfStroke then G.mfStroke.Color=rbw() end
+        if G.hGrad    then G.hGrad.Rotation=(rainbowClock*40)%360 end
+        if G.grabTitle then G.grabTitle.TextColor3=rbw() end
+        if G.grabPatterns then
+            for _,s in ipairs(G.grabPatterns) do
+                local t=rainbowClock+s.ph; local ox=math.sin(t*0.9)*4; local oy=math.cos(t*0.7)*4
+                local sc=0.4+math.abs(math.sin(t*1.2))*0.5
+                s.dot.Position=UDim2.new(0,s.bx+ox,0,s.by+oy); s.dot.Size=UDim2.new(0,3+sc*3,0,3+sc*3)
+                s.dot.BackgroundColor3=hsv(((rainbowClock*0.25+s.ph*0.15)%1),1,1); s.dot.BackgroundTransparency=0.35+sc*0.35
+            end
+        end
+    end)
+
+    return sg
+end
+
+-- ════════════════════════════════════════════════════════════
+-- STEAL LOOP
+-- ════════════════════════════════════════════════════════════
+local function getTargetAnimal()
+    if not grabEnabled then return nil end
+    if grabAutoMode then
+        local best,bestDist=nil,math.huge
+        for _,pet in ipairs(allAnimals) do
+            if not isMyBase(pet) then local d=distToTarget(pet); if d<bestDist then bestDist=d; best=pet end end
+        end; return best
+    else local pet=allAnimals[grabSelIdx]; if pet and not isMyBase(pet) then return pet end; return nil end
+end
+
+RunService.Heartbeat:Connect(function(dt)
+    if not grabEnabled then
+        if stealPhase~="idle" then stealPct=0; stealTarget=nil; stealPhase="idle"; dipTarget=0; stealFiring=false; updateGrabUI() end; return
+    end
+    if stealFiring then return end
+    local target=getTargetAnimal()
+    if target~=stealTarget then
+        stealTarget=target
+        if not target then
+            if stealPhase=="dipping" or stealPhase=="rushing" then stealPct=90; stealPhase="holding"
+            elseif stealPhase=="idle" then stealPhase="charging" end
+        else
+            if stealPhase=="idle" then stealPhase="charging"
+            elseif stealPhase=="holding" or stealPhase=="dipping" or stealPhase=="rushing" then stealPct=90; stealPhase="holding"; dipTarget=0 end
+        end
+    end
+    if not stealTarget then updateGrabUI(); return end
+    local dist=distToTarget(stealTarget)
+    if stealPhase=="charging" then
+        stealPct=stealPct+CHARGE_SPEED*dt; if stealPct>=90 then stealPct=90; stealPhase="holding" end
+    elseif stealPhase=="holding" then
+        stealPct=90; if dist<=TRIGGER_DIST then dipTarget=90-DIP_AMOUNT-math.random(0,3); stealPhase="dipping" end
+    elseif stealPhase=="dipping" then
+        stealPct=stealPct-DIP_SPEED*dt; if stealPct<=dipTarget then stealPct=dipTarget; stealPhase="rushing" end
+    elseif stealPhase=="rushing" then
+        stealPct=stealPct+RUSH_SPEED*dt
+        if stealPct>=100 then
+            stealPct=100; updateGrabUI()
+            local now=tick()
+            if now-lastStealTime>=STEAL_COOLDOWN then
+                lastStealTime=now; stealFiring=true
+                task.spawn(function()
+                    local prompt=PromptCache[stealTarget and stealTarget.uid or ""] or findPrompt(stealTarget)
+                    if prompt then buildCallbacks(prompt); if StealCache[prompt] and StealCache[prompt].ready then fireSteal(prompt) end end
+                    task.wait(0.25); stealPct=90; stealPhase="holding"; dipTarget=0; stealFiring=false; refreshESP(); updateGrabUI()
+                end)
+            else stealPct=90; stealPhase="holding"; dipTarget=0 end
+            return
+        end
+    end
+    updateGrabUI()
+end)
+
+task.spawn(function() while true do task.wait(3); if grabEnabled then refreshESP() end end end)
+
+-- ════════════════════════════════════════════════════════════
+-- WIRE UP
+-- ════════════════════════════════════════════════════════════
+updateAutoBlockUI(); updateAutoGrabButton()
+
+TeleportButton.MouseButton1Click:Connect(function()
+    teleportAll(); if autoBlockEnabled then task.wait(1); checkAndBlockFlaggedPlayers() end
+end)
+KeybindButton.MouseButton1Click:Connect(function()
+    KeybindButton.Text="⌨  Press a key..."; waitingForKey=true
+end)
+AutoBlockButton.MouseButton1Click:Connect(function()
+    autoBlockEnabled=not autoBlockEnabled; updateAutoBlockUI()
+end)
+SetDelayButton.MouseButton1Click:Connect(setBlockDelay)
+DelayTextBox.FocusLost:Connect(setBlockDelay)
+BlockAllButton.MouseButton1Click:Connect(blockAllPlayers)
+
+local grabSG=nil
+AutoGrabButton.MouseButton1Click:Connect(function()
+    if not grabSG then return end; grabSG.Enabled=not grabSG.Enabled
+end)
+
+UserInputService.InputBegan:Connect(function(input,gameProcessed)
+    if gameProcessed then return end
+    if waitingForKey and input.UserInputType==Enum.UserInputType.Keyboard then
+        teleportKey=input.KeyCode; KeybindButton.Text="⌨  Keybind: ["..teleportKey.Name.."]"; waitingForKey=false
+    elseif input.KeyCode==teleportKey then
+        teleportAll(); if autoBlockEnabled then task.wait(1); checkAndBlockFlaggedPlayers() end
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════
+-- INIT
+-- ════════════════════════════════════════════════════════════
+setupBrainrotDetection()
+task.spawn(function()
+    for i=1,20 do if AnimalsData and AnimalsShared and NumberUtils then break end; task.wait(0.5) end
+    task.wait(1.5); grabSG=createGrabGUI(); initScanner(); task.wait(1)
+    updateGrabUI(); updateAutoGrabButton()
+    print("✦ Hyzer Tp-Block chargé ! ✦")
+end)
